@@ -150,6 +150,7 @@
   <span class="tag" id="regionTag">region</span>
   <label class="btn">Image…<input type="file" id="regionFile" accept="image/*" style="display:none"></label>
   🔍 <input type="range" id="regionZoom" min="1" max="6" step="0.01" value="1">
+  <input type="number" id="regionZoomPct" min="100" max="600" step="1" value="100">%
   <button id="regionFit">Fit</button>
   <button id="regionMerge">Remove all gaps</button>
   <button class="danger" id="regionClear">Clear image</button>
@@ -595,6 +596,7 @@ function syncPanel(){
   document.getElementById('regionTag').textContent =
     `${selected.cells.length} pockets · ${(selected.rw/10).toFixed(1)} × ${(selected.rh/10).toFixed(1)} cm`;
   document.getElementById('regionZoom').value = selected.state.scale.toFixed(2);
+  document.getElementById('regionZoomPct').value = Math.round(selected.state.scale*100);
   const mb = document.getElementById('regionMerge');
   mb.disabled = selected.cells.length < 2;
   mb.textContent = joined ? 'Restore all gaps' : 'Remove all gaps';
@@ -609,11 +611,20 @@ document.getElementById('regionFile').addEventListener('change', e=>{
 document.getElementById('regionZoom').addEventListener('input', e=>{
   if (!selected || !selected.state.hasImg) return;
   selected.state.scale = parseFloat(e.target.value); applyRegion(selected);
+  document.getElementById('regionZoomPct').value = Math.round(selected.state.scale*100);
+});
+document.getElementById('regionZoomPct').addEventListener('input', e=>{
+  if (!selected || !selected.state.hasImg) return;
+  const z = document.getElementById('regionZoom');
+  const pct = Math.min(600, Math.max(100, parseFloat(e.target.value)||100));
+  selected.state.scale = pct/100; z.value = selected.state.scale.toFixed(2);
+  applyRegion(selected);
 });
 document.getElementById('regionFit').addEventListener('click', ()=>{
   if (!selected || !selected.state.hasImg) return;
   const s=selected.state; s.scale=1; s.tx=0; s.ty=0;
-  document.getElementById('regionZoom').value='1'; applyRegion(selected);
+  document.getElementById('regionZoom').value='1';
+  document.getElementById('regionZoomPct').value='100'; applyRegion(selected);
 });
 document.getElementById('regionMerge').addEventListener('click', ()=>{ if (selected) toggleMerge(selected); });
 document.getElementById('regionClear').addEventListener('click', ()=>{ if (selected) clearRegionImage(selected); });
