@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Binder Page Cropper — 3×3</title>
+<style>
+  :root{
+    --cell-w: 68;    /* one pocket, mm */
+    --cell-h: 95;
+    --gap:    5;      /* pocket gap / webbing allowance, mm (set in toolbar) */
+
+    /* crop-mark geometry (mm) — outer page corners only */
+    --pad: 6;  --mgap: 1.2;  --mlen: 3.5;  --th: 0.2;
+  }
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; }
+  body{
+    font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    background:#1c1f26; color:#e7e9ee;
+  }
+
+  /* ---------------- toolbar ---------------- */
+  .toolbar{
+    position:sticky; top:0; z-index:30;
+    display:flex; flex-wrap:wrap; align-items:center; gap:8px;
+    padding:10px 14px; background:#12141a; border-bottom:1px solid #2b2f3a;
+  }
+  .toolbar h1{ font-size:15px; margin:0 10px 0 0; font-weight:600; }
+  .toolbar .spacer{ flex:1; }
+  button, label.btn, select, input[type=number]{
+    font:inherit; font-size:13px; background:#2a2f3b; color:#e7e9ee;
+    border:1px solid #3a4150; border-radius:7px; padding:7px 11px; cursor:pointer;
+  }
+  input[type=number]{ width:60px; cursor:text; }
+  button:hover, label.btn:hover{ background:#333a49; }
+  button.primary{ background:#3b6ef0; border-color:#3b6ef0; }
+  button.primary:hover{ background:#4d7bf3; }
+  .toolbar .chk{ display:flex; align-items:center; gap:6px; cursor:pointer; padding:6px 4px; }
+  .toolbar .field{ display:flex; align-items:center; gap:6px; font-size:12px; color:#c3c9d4; }
+  .hint{ font-size:12px; color:#9aa2b1; }
+
+  /* contextual panel for the selected region */
+  #regionPanel{
+    display:none; align-items:center; gap:10px;
+    padding:8px 14px; background:#171a21; border-bottom:1px solid #2b2f3a;
+    position:sticky; top:53px; z-index:29;
+  }
+  #regionPanel.on{ display:flex; }
+  #regionPanel input[type=range]{ width:160px; }
+  #regionPanel .tag{ font-size:12px; color:#9aa2b1; }
+  #regionPanel .danger{ border-color:#5a2b2b; }
+  #regionPanel .danger:hover{ background:#3a2226; }
+
+  /* ---------------- board ---------------- */
+  #board{ display:flex; flex-wrap:wrap; gap:14mm; padding:18px; align-items:flex-start; }
+
+  .stage{ position:relative; padding:calc(var(--pad)*1mm); }
+  .page{
+    position:relative;
+    display:grid;
+    grid-template-columns:repeat(3, calc(var(--cell-w)*1mm));
+    grid-template-rows:repeat(3, calc(var(--cell-h)*1mm));
+    gap:calc(var(--gap)*1mm);
+    background:#0d0f14;
+  }
+  .cell{
+    position:relative; overflow:hidden; background:#0d0f14;
+    outline:calc(var(--th)*1mm) solid #000;      /* cut line */
+    outline-offset:calc(var(--th)*-1mm);
+    cursor:crosshair;
+  }
+  .cell.occupied{ cursor:grab; background:#000; }
+  .cell.occupied.dragging{ cursor:grabbing; }
+  .cell.sel{ background:#22304e; }
+  .cell.dropok{ outline-color:#3b6ef0; }
+  .cell img{
+    position:absolute; left:0; top:0; max-width:none;
+    user-select:none; -webkit-user-drag:none; pointer-events:none; image-rendering:auto;
+  }
+  .cell .ph{
+    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    color:#5c6474; font-size:12px; pointer-events:none;
+  }
+  .region-outline{ outline:1.5px solid #3b6ef0 !important; outline-offset:-1.5px; z-index:6; }
+
+  /* a piece = one pocket window (or a gap-filler). cut lines are drawn per-side
+     with inset box-shadow so a removed gap simply has no line there. */
+  .piece{
+    position:absolute; overflow:hidden; background:#0d0f14; z-index:5; cursor:grab;
+  }
+  .piece.dragging{ cursor:grabbing; }
+  .piece img{ position:absolute; left:0; top:0; max-width:none;
+    user-select:none; -webkit-user-drag:none; pointer-events:none; image-rendering:auto; }
+  #board.no-trim .piece{ box-shadow:none !important; }
+
+  /* a clickable chip that lives IN the gap between two slots.
+     ✕ (red)  = a gap/border is here  → click to REMOVE the gap (join the slots)
+     ↔ (blue) = the gap is removed (image continuous) → click to put the gap back */
+  .seam{ position:absolute; z-index:12; cursor:pointer;
+    display:flex; align-items:center; justify-content:center; }
+  .seam:hover{ background:rgba(74,163,255,.22); border-radius:1mm; }
+  .seam-btn{
+    font-family:system-ui,sans-serif; font-size:2.4mm; line-height:1;
+    min-width:3.8mm; text-align:center; padding:0.5mm 0.6mm; border-radius:1mm;
+    background:#0d0f14; color:#4aa3ff; border:0.4mm solid #4aa3ff;
+    box-shadow:0 0 1.2mm rgba(0,0,0,.7);
+  }
+  .seam.kept .seam-btn{ color:#ff6b6b; border-color:#ff6b6b; }
+
+  /* crop marks (outer page corners) */
+  .marks{ position:absolute; inset:0; pointer-events:none; z-index:7; }
+  .marks .tick{ position:absolute; background:#000; }
+
+  /* printRoot holds the packed print tiles for output */
+  #printRoot{ display:none; }
+
+  /* ---------------- print: one unit per image, packed on A4 landscape ---------------- */
+  @media print{
+    @page{ size:A4 landscape; margin:6mm; }
+    body{ background:#fff; color:#000; }
+    .toolbar, #regionPanel, #board{ display:none !important; }
+    #printRoot{ display:block !important; font-size:0; }
+    .punit{ display:inline-block; vertical-align:top; margin:1.5mm 2.5mm;
+      position:relative; break-inside:avoid; }
+    .punit .pcell{ position:absolute; overflow:hidden; background:#fff; }
+    .punit .pcell img{ position:absolute; left:0; top:0; max-width:none; }
+    *{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  }
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+  <h1>Binder Page Cropper</h1>
+  <button class="primary" id="addPage">+ Page (3×3)</button>
+  <button id="placeBtn" disabled>Place image (0)</button>
+  <button id="clearSelBtn" disabled>Clear selection</button>
+  <div class="field">pocket gap
+    <input type="number" id="gap" value="5" min="0" max="10" step="0.5"> mm
+  </div>
+  <label class="chk"><input type="checkbox" id="toggleMarks" checked> crop marks</label>
+  <label class="chk"><input type="checkbox" id="toggleTrim" checked> cut lines</label>
+  <div class="spacer"></div>
+  <span class="hint">click pockets (or drag) to select → Place image · drag image to move · zoom with the slider · click a gap’s ✕ to join slots</span>
+  <button id="printBtn">Print…</button>
+</div>
+
+<div id="regionPanel">
+  <span class="tag" id="regionTag">region</span>
+  <label class="btn">Image…<input type="file" id="regionFile" accept="image/*" style="display:none"></label>
+  🔍 <input type="range" id="regionZoom" min="1" max="6" step="0.01" value="1">
+  <button id="regionFit">Fit</button>
+  <button id="regionMerge">Remove all gaps</button>
+  <button class="danger" id="regionClear">Clear image</button>
+  <button class="danger" id="regionRemove">Remove</button>
+  <span class="hint">click a ✕ chip in a gap to remove it · paste replaces image · Delete removes region</span>
+</div>
+
+<div id="board"></div>
+
+<script>
+/* ================================================================
+   Binder Page Cropper
+   - Persistent 3×3 pocket grid (a binder page).
+   - Drag-select a block of empty pockets, drop an image across them.
+   - The image is rendered continuously across the block; each pocket
+     clips its own window, so cutting along the grid gives pocket-size
+     pieces (68×95mm) that recreate the picture in the binder.
+   ================================================================ */
+
+const css = getComputedStyle(document.documentElement);
+const nv  = n => parseFloat(css.getPropertyValue(n));
+const W = nv('--cell-w'), H = nv('--cell-h');
+const MARK = { pad:nv('--pad'), gap:nv('--mgap'), len:nv('--mlen'), th:nv('--th') };
+let GAP = 5;
+
+const board = document.getElementById('board');
+const panel = document.getElementById('regionPanel');
+let selected = null;               // selected region object
+
+function pxPerMm(){
+  const r = document.createElement('div');
+  r.style.cssText = 'position:absolute;visibility:hidden;width:100mm;height:0';
+  document.body.appendChild(r);
+  const v = r.getBoundingClientRect().width / 100;
+  r.remove();
+  return v;
+}
+
+/* ---------------- page factory ---------------- */
+function addPage(){
+  const model = { cells:[], regions:[] };
+
+  const stage = document.createElement('div'); stage.className = 'stage';
+  const page  = document.createElement('div'); page.className = 'page';
+
+  for (let r=0; r<3; r++) for (let c=0; c<3; c++){
+    const cell = document.createElement('div');
+    cell.className = 'cell';
+    cell.dataset.r = r; cell.dataset.c = c; cell.dataset.i = r*3+c;
+    const ph = document.createElement('div'); ph.className = 'ph'; ph.textContent = '＋';
+    cell.append(ph);
+    page.append(cell);
+    model.cells.push({ el:cell, ph, region:null, r, c });
+  }
+  stage.append(page);
+  const marks = buildMarks(); stage.append(marks); model.marks = marks;
+  board.append(stage);
+
+  wireSelection(model, page);
+  return model;
+}
+
+const cellAt = (m,r,c) => m.cells[r*3+c];
+
+/* ---------------- pocket selection (click / drag to toggle) ---------------- */
+/* A pending selection is built up by clicking pockets (toggle) or dragging a
+   range, then committed to a region with the "Place image" button. */
+let pending = null;   // { model, set:Set<idx> }
+
+function ensurePending(model){
+  if (pending && pending.model !== model) clearPending();
+  if (!pending) pending = { model, set:new Set() };
+  return pending;
+}
+function clearPending(){
+  if (!pending) return;
+  pending.model.cells.forEach(cd=>cd.el.classList.remove('sel'));
+  pending = null;
+  updatePlaceBtn();
+}
+function paintPending(preview){
+  if (!pending) return;
+  pending.model.cells.forEach((cd,i)=>{
+    // NB: must be a real boolean — classList.toggle(cls, undefined) *toggles*
+    const on = !!((pending.set.has(i) || (preview && preview.has(i))) && !cd.region);
+    cd.el.classList.toggle('sel', on);
+  });
+}
+function updatePlaceBtn(){
+  const n = pending ? pending.set.size : 0;
+  const p = document.getElementById('placeBtn');
+  p.disabled = n===0; p.textContent = `Place image (${n})`;
+  document.getElementById('clearSelBtn').disabled = n===0;
+}
+
+/* the empty pockets in the rectangle spanned by indices a and b */
+function rangeSet(model, a, b){
+  const ar=Math.floor(a/3), ac=a%3, br=Math.floor(b/3), bc=b%3;
+  const r0=Math.min(ar,br), r1=Math.max(ar,br), c0=Math.min(ac,bc), c1=Math.max(ac,bc);
+  const s = new Set();
+  for (let r=r0;r<=r1;r++) for (let c=c0;c<=c1;c++){ const i=r*3+c; if (!model.cells[i].region) s.add(i); }
+  return s;
+}
+/* the .cell under a client point that belongs to this page, or null */
+function pageCellAt(page, x, y){
+  const el = document.elementFromPoint(x, y);
+  const cellEl = el && el.closest && el.closest('.cell');
+  return (cellEl && cellEl.parentElement === page) ? cellEl : null;
+}
+
+function wireSelection(model, page){
+  let pan = null;     // {region,x,y,ppm}
+  let drag = null;    // {startIdx, curIdx}
+
+  page.addEventListener('pointerdown', e=>{
+    const cellEl = e.target.closest('.cell'); if (!cellEl || cellEl.parentElement!==page) return;
+    const idx = +cellEl.dataset.i;
+    const cd = model.cells[idx];
+    if (cd.region){ selectRegion(cd.region); return; }   // occupied → block handles pan/zoom
+    ensurePending(model);                            // empty → begin click/drag select
+    drag = { startIdx:idx, curIdx:idx };
+    page.setPointerCapture(e.pointerId);
+  });
+
+  page.addEventListener('pointermove', e=>{
+    if (pan){
+      const s = pan.region.state;
+      s.tx += (e.clientX - pan.x) / pan.ppm;
+      s.ty += (e.clientY - pan.y) / pan.ppm;
+      pan.x = e.clientX; pan.y = e.clientY;
+      applyRegion(pan.region);
+      return;
+    }
+    if (drag){
+      const cellEl = pageCellAt(page, e.clientX, e.clientY);
+      if (cellEl) drag.curIdx = +cellEl.dataset.i;
+      paintPending(rangeSet(model, drag.startIdx, drag.curIdx));   // live feedback
+    }
+  });
+
+  const finish = ()=>{
+    if (pan){ pan.region.cells.forEach(ci=>model.cells[ci].el.classList.remove('dragging')); pan=null; }
+    if (drag){
+      if (drag.curIdx === drag.startIdx){            // stayed in one pocket → toggle it
+        const i = drag.startIdx;
+        if (pending.set.has(i)) pending.set.delete(i);
+        else if (!model.cells[i].region) pending.set.add(i);
+      } else {                                        // dragged across pockets → add the range
+        rangeSet(model, drag.startIdx, drag.curIdx).forEach(i=>pending.set.add(i));
+      }
+      drag = null; paintPending(); updatePlaceBtn();
+    }
+  };
+  page.addEventListener('pointerup', finish);
+  page.addEventListener('pointercancel', finish);
+}
+
+/* ---------------- region ---------------- */
+function regionSize(rows,cols){
+  return { rw: cols*W + (cols-1)*GAP, rh: rows*H + (rows-1)*GAP };
+}
+
+/* build a region from an arbitrary set of pocket indices (may be non-rectangular;
+   the image is laid out across the bounding box, each member pocket shows a slice) */
+function createRegionFromCells(model, indices){
+  const rs = indices.map(i=>Math.floor(i/3)), cs = indices.map(i=>i%3);
+  const r0 = Math.min(...rs), r1 = Math.max(...rs);
+  const c0 = Math.min(...cs), c1 = Math.max(...cs);
+  const rows = r1-r0+1, cols = c1-c0+1;
+  const { rw, rh } = regionSize(rows,cols);
+  const region = {
+    model, page:model.cells[0].el.parentElement, r0, c0, rows, cols, rw, rh, cells:[],
+    pieces:[], handles:[], imgs:[], removedEdges:new Set(),   // removed gaps between same-image pockets
+    state:{ scale:1, tx:0, ty:0, baseW:0, baseH:0, hasImg:false, src:null, ratio:1 },
+  };
+  indices.slice().sort((a,b)=>a-b).forEach(i=>{
+    const cd = model.cells[i];
+    cd.region = region; cd.el.classList.add('occupied'); cd.ph.style.display='none';
+    region.cells.push(i);
+  });
+  model.regions.push(region);
+  buildRegionDom(region);
+  selectRegion(region);
+  document.getElementById('regionFile').click();   // prompt for the image
+  return region;
+}
+
+/* ---- edge helpers (an edge is the border between two adjacent pockets) ---- */
+const eKey = (t,r,c) => `${t}:${r}:${c}`;                  // t: 'V' (r,c)|(r,c+1)  or 'H' (r,c)|(r+1,c)
+function isMember(region,r,c){
+  if (r<0||r>2||c<0||c>2) return false;
+  return region.model.cells[r*3+c].region === region;
+}
+const isRemoved = (region,t,r,c) => region.removedEdges.has(eKey(t,r,c));
+/* which sides of pocket (r,c) get a cut line (true) vs are joined to a neighbour (false) */
+function borderSides(region,r,c){
+  return {
+    t: !(isMember(region,r-1,c) && isRemoved(region,'H',r-1,c)),
+    b: !(isMember(region,r+1,c) && isRemoved(region,'H',r,c)),
+    l: !(isMember(region,r,c-1) && isRemoved(region,'V',r,c-1)),
+    r: !(isMember(region,r,c+1) && isRemoved(region,'V',r,c)),
+  };
+}
+function shadowFor(s, color='#000', t='calc(var(--th)*1mm)'){
+  const p=[];
+  if (s.t) p.push(`inset 0 ${t} 0 0 ${color}`);
+  if (s.b) p.push(`inset 0 -${t} 0 0 ${color}`);
+  if (s.l) p.push(`inset ${t} 0 0 0 ${color}`);
+  if (s.r) p.push(`inset -${t} 0 0 0 ${color}`);
+  return p.join(',');
+}
+function allInternalEdges(region){
+  const s=new Set();
+  region.cells.forEach(ci=>{ const cd=region.model.cells[ci], r=cd.r, c=cd.c;
+    if (isMember(region,r,c+1)) s.add(eKey('V',r,c));   // horizontal neighbours only
+  });
+  return s;
+}
+
+/* drop a single pocket from a region; the rest keep their image & alignment */
+function removeCellFromRegion(region, idx){
+  const cd = region.model.cells[idx];
+  if (cd.region !== region) return;
+  const r=cd.r, c=cd.c;
+  region.cells = region.cells.filter(i=>i!==idx);
+  cd.region = null;
+  cd.el.classList.remove('occupied');
+  cd.ph.style.display = '';
+  ['V:'+r+':'+(c-1),'V:'+r+':'+c,'H:'+(r-1)+':'+c,'H:'+r+':'+c].forEach(k=>region.removedEdges.delete(k));
+  if (region.cells.length === 0){ removeRegion(region); return; }
+  buildRegionDom(region);
+  if (selected===region) selectRegion(region);
+}
+
+/* (re)build a region: one piece per pocket + gap-fillers where borders were removed */
+function buildRegionDom(region){
+  const m = region.model, page = region.page;
+  (region.pieces ||[]).forEach(p=>p.el.remove());
+  (region.handles||[]).forEach(h=>h.remove());
+  region.pieces=[]; region.handles=[]; region.imgs=[];
+
+  const add = (pl,pt,w,h,ox,oy,sides)=>{
+    const el=document.createElement('div'); el.className='piece';
+    el.style.left=pl+'mm'; el.style.top=pt+'mm'; el.style.width=w+'mm'; el.style.height=h+'mm';
+    if (sides) el.style.boxShadow = shadowFor(sides);
+    const img=document.createElement('img'); el.append(img);
+    el._region=region; page.append(el);
+    region.pieces.push({ el, img, pl, pt, w, h, ox, oy, sides });
+    region.imgs.push({ img, ox, oy, w, h });
+    attachBlockPointer(region, el);
+  };
+
+  // one window per pocket
+  region.cells.forEach(ci=>{
+    const cd=m.cells[ci], r=cd.r, c=cd.c;
+    add(c*(W+GAP), r*(H+GAP), W, H, (c-region.c0)*(W+GAP), (r-region.r0)*(H+GAP), borderSides(region,r,c));
+  });
+  // fill each removed gap with continuous image
+  region.removedEdges.forEach(key=>{
+    const [t,rs,cs]=key.split(':'); const r=+rs, c=+cs;
+    if (t==='V'){
+      if (!isMember(region,r,c)||!isMember(region,r,c+1)) return;
+      const sd=borderSides(region,r,c);
+      add(c*(W+GAP)+W, r*(H+GAP), GAP, H, (c-region.c0)*(W+GAP)+W, (r-region.r0)*(H+GAP), {t:sd.t,b:sd.b,l:false,r:false});
+    } else {
+      if (!isMember(region,r,c)||!isMember(region,r+1,c)) return;
+      const sd=borderSides(region,r,c);
+      add(c*(W+GAP), r*(H+GAP)+H, W, GAP, (c-region.c0)*(W+GAP), (r-region.r0)*(H+GAP)+H, {t:false,b:false,l:sd.l,r:sd.r});
+    }
+  });
+  // fill the little centre square only when ALL FOUR gaps around it are removed
+  for (let r=0;r<2;r++) for (let c=0;c<2;c++){
+    if (!(isMember(region,r,c)&&isMember(region,r,c+1)&&isMember(region,r+1,c)&&isMember(region,r+1,c+1))) continue;
+    const fill = isRemoved(region,'V',r,c) && isRemoved(region,'V',r+1,c)
+              && isRemoved(region,'H',r,c) && isRemoved(region,'H',r,c+1);
+    if (fill) add(c*(W+GAP)+W, r*(H+GAP)+H, GAP, GAP, (c-region.c0)*(W+GAP)+W, (r-region.r0)*(H+GAP)+H, null);
+  }
+  // a handle on every horizontal-neighbour gap: ✕ chip if present,
+  // an invisible hover-strip (click to restore) if removed. (no vertical joins)
+  region.cells.forEach(ci=>{
+    const cd=m.cells[ci], r=cd.r, c=cd.c;
+    if (isMember(region,r,c+1)) region.handles.push(makeChip(region,'V',r,c));
+  });
+  region.handles.forEach(h=>page.append(h));
+
+  if (region.state.hasImg) applyRegionSrc(region);
+}
+
+/* handle over one internal border. present gap → ✕ chip to remove it;
+   removed gap → no chip, just a hover-highlighted strip to put it back. */
+function makeChip(region, t, r, c){
+  const removed = isRemoved(region,t,r,c);
+  const h=document.createElement('div'); h.className='seam '+(t==='V'?'v':'h')+(removed?'':' kept');
+  const thick=Math.max(GAP,5);
+  if (t==='V'){
+    const cx=c*(W+GAP)+W+GAP/2;
+    h.style.left=(cx-thick/2)+'mm'; h.style.width=thick+'mm';
+    h.style.top=(r*(H+GAP))+'mm'; h.style.height=H+'mm';
+  } else {
+    const cy=r*(H+GAP)+H+GAP/2;
+    h.style.top=(cy-thick/2)+'mm'; h.style.height=thick+'mm';
+    h.style.left=(c*(W+GAP))+'mm'; h.style.width=W+'mm';
+  }
+  if (!removed){
+    const btn=document.createElement('span'); btn.className='seam-btn'; btn.textContent='✕';
+    h.append(btn);
+  }
+  h.title = removed ? 'put this gap back' : 'remove this gap (join the slots)';
+  h.addEventListener('pointerdown', e=>e.stopPropagation());
+  h.addEventListener('click', e=>{
+    e.stopPropagation();
+    const k=eKey(t,r,c);
+    region.removedEdges.has(k) ? region.removedEdges.delete(k) : region.removedEdges.add(k);
+    buildRegionDom(region); selectRegion(region);
+  });
+  return h;
+}
+
+/* which of the region's pockets is under a client point (or null) */
+function pocketUnder(region, x, y){
+  const ppm=pxPerMm(), pr=region.page.getBoundingClientRect();
+  const c=Math.floor((x-pr.left)/ppm/(W+GAP)), r=Math.floor((y-pr.top)/ppm/(H+GAP));
+  if (r<0||r>2||c<0||c>2) return null;
+  const idx=r*3+c;
+  return region.model.cells[idx].region===region ? idx : null;
+}
+
+/* fresh image: capture ratio, then size + place */
+function loadRegionSrc(region, src){
+  const img0 = new Image();
+  img0.onload = ()=>{
+    const st = region.state;
+    st.ratio = img0.naturalWidth/img0.naturalHeight;
+    st.src = src; st.hasImg = true; st.scale = 1; st.tx = 0; st.ty = 0;
+    applyRegionSrc(region);
+    if (selected===region) syncPanel();
+  };
+  img0.src = src;
+}
+
+/* size the region's image(s) to cover the current rw×rh, then position */
+function applyRegionSrc(region){
+  const st = region.state; if (!st.hasImg) return;
+  const sr = region.rw/region.rh;
+  const fitH = st.ratio >= sr;                       // lock height, else width
+  if (fitH){ st.baseH = region.rh; st.baseW = region.rh*st.ratio; }
+  else     { st.baseW = region.rw; st.baseH = region.rw/st.ratio; }
+  region.imgs.forEach(o=>{
+    o.img.src = st.src;
+    if (fitH){ o.img.style.height = region.rh+'mm'; o.img.style.width='auto'; }
+    else     { o.img.style.width  = region.rw+'mm'; o.img.style.height='auto'; }
+  });
+  applyRegion(region);
+}
+
+function clampRegion(region){
+  const s = region.state;
+  const maxX = Math.max(0,(s.baseW*s.scale - region.rw)/2);
+  const maxY = Math.max(0,(s.baseH*s.scale - region.rh)/2);
+  s.tx = Math.min(maxX, Math.max(-maxX, s.tx));
+  s.ty = Math.min(maxY, Math.max(-maxY, s.ty));
+}
+function applyRegion(region){
+  clampRegion(region);
+  const s = region.state;
+  const cx = region.rw/2 + s.tx, cy = region.rh/2 + s.ty;
+  region.imgs.forEach(o=>{
+    o.img.style.transform =
+      `translate(${-o.ox}mm,${-o.oy}mm) translate(${cx}mm,${cy}mm) translate(-50%,-50%) scale(${s.scale})`;
+  });
+}
+
+/* pan/remove handlers for a block overlay (zoom is via the region panel slider) */
+function attachBlockPointer(region, blk){
+  let drag = null;
+  blk.addEventListener('pointerdown', e=>{
+    selectRegion(region);
+    if (!region.state.hasImg) return;
+    drag = { x:e.clientX, y:e.clientY, ppm:pxPerMm() };
+    blk.classList.add('dragging'); blk.setPointerCapture(e.pointerId);
+  });
+  blk.addEventListener('pointermove', e=>{
+    if (!drag) return;
+    region.state.tx += (e.clientX-drag.x)/drag.ppm;
+    region.state.ty += (e.clientY-drag.y)/drag.ppm;
+    drag.x = e.clientX; drag.y = e.clientY; applyRegion(region);
+  });
+  const end = ()=>{ drag=null; blk.classList.remove('dragging'); };
+  blk.addEventListener('pointerup', end);
+  blk.addEventListener('pointercancel', end);
+}
+
+/* whether every internal border of the region is removed (fully joined) */
+function allJoined(region){
+  const all = allInternalEdges(region);
+  return all.size>0 && [...all].every(k=>region.removedEdges.has(k));
+}
+/* toggle ALL internal borders at once (join everything / put every gap back) */
+function toggleMerge(region){
+  if (region.cells.length < 2) return;
+  region.removedEdges = allJoined(region) ? new Set() : allInternalEdges(region);
+  buildRegionDom(region);
+  selectRegion(region);
+}
+
+/* un-set the image but keep the pockets reserved */
+function clearRegionImage(region){
+  const st = region.state;
+  st.hasImg=false; st.src=null; st.scale=1; st.tx=0; st.ty=0;
+  region.imgs.forEach(o=>{ o.img.removeAttribute('src'); o.img.style.transform=''; });
+  if (selected===region) syncPanel();
+}
+
+/* remove the region entirely, freeing its pockets */
+function removeRegion(region){
+  (region.pieces ||[]).forEach(p=>p.el.remove());
+  (region.handles||[]).forEach(h=>h.remove());
+  region.cells.forEach(ci=>{
+    const cd = region.model.cells[ci];
+    cd.region = null;
+    cd.el.classList.remove('occupied','region-outline');
+    cd.ph.style.display = '';
+  });
+  region.model.regions = region.model.regions.filter(r=>r!==region);
+  if (selected===region){ selected=null; panel.classList.remove('on'); }
+}
+
+/* ---------------- selection / panel ---------------- */
+function clearOutline(region){
+  if (!region) return;
+  (region.pieces ||[]).forEach(p=>p.el.classList.remove('region-outline'));
+}
+function selectRegion(region){
+  if (selected && selected!==region) clearOutline(selected);
+  selected = region;
+  (region.pieces ||[]).forEach(p=>p.el.classList.add('region-outline'));
+  panel.classList.add('on');
+  syncPanel();
+}
+function syncPanel(){
+  if (!selected) return;
+  const joined = allJoined(selected);
+  document.getElementById('regionTag').textContent =
+    `${selected.cells.length} pockets · ${(selected.rw/10).toFixed(1)} × ${(selected.rh/10).toFixed(1)} cm`;
+  document.getElementById('regionZoom').value = selected.state.scale.toFixed(2);
+  const mb = document.getElementById('regionMerge');
+  mb.disabled = selected.cells.length < 2;
+  mb.textContent = joined ? 'Restore all gaps' : 'Remove all gaps';
+  mb.title = 'toggle every internal gap of this image · or click a ✕ chip for one';
+  document.getElementById('regionClear').disabled = !selected.state.hasImg;
+}
+
+document.getElementById('regionFile').addEventListener('change', e=>{
+  const f = e.target.files[0]; e.target.value='';
+  if (f && selected) fileToRegion(f, selected);
+});
+document.getElementById('regionZoom').addEventListener('input', e=>{
+  if (!selected || !selected.state.hasImg) return;
+  selected.state.scale = parseFloat(e.target.value); applyRegion(selected);
+});
+document.getElementById('regionFit').addEventListener('click', ()=>{
+  if (!selected || !selected.state.hasImg) return;
+  const s=selected.state; s.scale=1; s.tx=0; s.ty=0;
+  document.getElementById('regionZoom').value='1'; applyRegion(selected);
+});
+document.getElementById('regionMerge').addEventListener('click', ()=>{ if (selected) toggleMerge(selected); });
+document.getElementById('regionClear').addEventListener('click', ()=>{ if (selected) clearRegionImage(selected); });
+document.getElementById('regionRemove').addEventListener('click', ()=>{ if (selected) removeRegion(selected); });
+
+/* keyboard: Delete removes the selected region, Esc clears a pending selection */
+window.addEventListener('keydown', e=>{
+  if (/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName)) return;
+  if (e.key==='Escape'){ clearPending(); return; }
+  if (e.key!=='Delete' && e.key!=='Backspace') return;
+  if (selected){ e.preventDefault(); removeRegion(selected); }
+});
+
+function fileToRegion(f, region){
+  if (!f || !f.type.startsWith('image/')) return;
+  const rd = new FileReader(); rd.onload = e=>loadRegionSrc(region, e.target.result);
+  rd.readAsDataURL(f);
+}
+
+/* find the region under a drop/hover target (occupied cell or merged overlay) */
+function regionAtTarget(t){
+  if (!t || !t.closest) return null;
+  const blk = t.closest('.piece'); if (blk && blk._region) return blk._region;
+  const cell = t.closest('.cell'); if (!cell) return null;
+  const model = pageModels.get(cell.parentElement);
+  const cd = model && model.cells[+cell.dataset.i];
+  return (cd && cd.region) || null;
+}
+/* drop an image onto an existing region → load it there */
+board.addEventListener('dragover', e=>{ if (regionAtTarget(e.target)) e.preventDefault(); });
+board.addEventListener('drop', e=>{
+  const region = regionAtTarget(e.target);
+  if (region && e.dataTransfer.files[0]){ e.preventDefault(); fileToRegion(e.dataTransfer.files[0], region); }
+});
+
+window.addEventListener('paste', e=>{
+  const item = [...(e.clipboardData?.items||[])].find(i=>i.type.startsWith('image/'));
+  if (!item || !selected) return;
+  fileToRegion(item.getAsFile(), selected);
+});
+
+/* deselect when clicking empty board space */
+board.addEventListener('pointerdown', e=>{
+  if (e.target === board){
+    clearOutline(selected);
+    selected=null; panel.classList.remove('on');
+  }
+});
+
+/* ---------------- crop marks (outer page corners) ---------------- */
+function buildMarks(){
+  const wrap = document.createElement('div'); wrap.className='marks';
+  const P=MARK.pad, G=MARK.gap, L=MARK.len, T=MARK.th;
+  const pw = 3*W + 2*GAP, ph = 3*H + 2*GAP;
+  const mm = v=>v+'mm';
+  const corners = [[0,0,-1,-1],[pw,0,1,-1],[0,ph,-1,1],[pw,ph,1,1]];
+  for (const [cx,cy,dx,dy] of corners){
+    const ax=P+cx, ay=P+cy;
+    const th=document.createElement('div'); th.className='tick';
+    th.style.height=mm(T); th.style.width=mm(L); th.style.top=mm(ay-T/2);
+    th.style.left = mm(dx<0 ? ax-G-L : ax+G);
+    const tv=document.createElement('div'); tv.className='tick';
+    tv.style.width=mm(T); tv.style.height=mm(L); tv.style.left=mm(ax-T/2);
+    tv.style.top = mm(dy<0 ? ay-G-L : ay+G);
+    wrap.append(th,tv);
+  }
+  return wrap;
+}
+
+/* ---------------- global controls ---------------- */
+const pageModels = new Map();   // pageEl -> model
+function addPageTracked(){ const m = addPage(); pageModels.set(m.cells[0].el.parentElement, m); return m; }
+
+document.getElementById('addPage').onclick = addPageTracked;
+document.getElementById('placeBtn').onclick = ()=>{
+  if (!pending || pending.set.size===0) return;
+  const model = pending.model, indices = [...pending.set];
+  clearPending();
+  createRegionFromCells(model, indices);
+};
+document.getElementById('clearSelBtn').onclick = clearPending;
+
+/* Split every image into its horizontal runs (a run = pockets joined by removed
+   gaps, i.e. one continuous printed piece; separate pockets are 1-wide runs),
+   then greedily pack the runs row-by-row so wide pieces fill the sheet. */
+function buildPrint(){
+  document.getElementById('printRoot')?.remove();
+  const root = document.createElement('div'); root.id = 'printRoot';
+  const trim = document.getElementById('toggleTrim').checked;
+
+  const units = [];   // {w, bl, bt, pieces:[]}
+  pageModels.forEach(model=>{
+    model.regions.forEach(rg=>{
+      if (!rg.state.hasImg) return;
+      const byRow = new Map();
+      rg.cells.forEach(ci=>{ const cd=model.cells[ci];
+        if (!byRow.has(cd.r)) byRow.set(cd.r, []); byRow.get(cd.r).push(cd.c); });
+      byRow.forEach((cols,r)=>{
+        cols.sort((a,b)=>a-b);
+        let cs=cols[0], prev=cols[0];
+        const flush=(ce)=>{
+          const bl=cs*(W+GAP), bt=r*(H+GAP), uw=(ce-cs)*(W+GAP)+W;
+          const pieces = rg.pieces.filter(p=>
+            Math.abs(p.pt - bt) < 0.01 && p.pl >= bl-0.01 && (p.pl+p.w) <= bl+uw+0.01);
+          units.push({ w:uw, bl, bt, pieces });
+        };
+        for (let i=1;i<cols.length;i++){
+          const c=cols[i];
+          if (c===prev+1 && isRemoved(rg,'V',r,prev)){ /* keep run going */ }
+          else { flush(prev); cs=c; }
+          prev=c;
+        }
+        flush(prev);
+      });
+    });
+  });
+
+  // first-fit-decreasing into rows of the A4-landscape printable width
+  const AVAIL = 284, outer = w => w + 5;          // 2.5mm margin each side
+  units.sort((a,b)=> b.w - a.w);
+  const rows = [];
+  units.forEach(u=>{
+    let row = rows.find(r=> r.rem >= outer(u.w));
+    if (!row){ row={ rem:AVAIL, items:[] }; rows.push(row); }
+    row.items.push(u); row.rem -= outer(u.w);
+  });
+
+  rows.flatMap(r=>r.items).forEach(u=>{
+    const unit = document.createElement('div'); unit.className = 'punit';
+    unit.style.width = u.w+'mm'; unit.style.height = H+'mm';
+    u.pieces.forEach(p=>{
+      const cell = document.createElement('div'); cell.className = 'pcell';
+      cell.style.left=(p.pl-u.bl)+'mm'; cell.style.top=(p.pt-u.bt)+'mm';
+      cell.style.width=p.w+'mm'; cell.style.height=p.h+'mm';
+      if (trim && p.sides) cell.style.boxShadow = shadowFor(p.sides);
+      cell.append(p.img.cloneNode(true));
+      unit.append(cell);
+    });
+    root.append(unit);
+  });
+  document.body.append(root);
+  return root;
+}
+document.getElementById('printBtn').onclick = ()=>{
+  const root = buildPrint();
+  const cleanup = ()=>{ root.remove(); window.removeEventListener('afterprint', cleanup); };
+  window.addEventListener('afterprint', cleanup);
+  window.print();
+};
+document.getElementById('toggleMarks').addEventListener('change', e=>{
+  document.querySelectorAll('.marks').forEach(m=>m.style.display = e.target.checked?'':'none');
+});
+document.getElementById('toggleTrim').addEventListener('change', e=>{
+  board.classList.toggle('no-trim', !e.target.checked);
+  document.querySelectorAll('.cell').forEach(c=>c.style.outlineWidth = e.target.checked?'':'0');
+});
+document.getElementById('gap').addEventListener('change', e=>{
+  GAP = Math.max(0, parseFloat(e.target.value)||0);
+  document.documentElement.style.setProperty('--gap', GAP);
+  // recompute every region (size, offsets, overlay position) and re-cover
+  pageModels.forEach(model=>{
+    model.marks.replaceWith(model.marks = buildMarks());        // page size changed
+    model.regions.forEach(region=>{
+      const { rw, rh } = regionSize(region.rows, region.cols);
+      region.rw = rw; region.rh = rh;
+      buildRegionDom(region);                                    // rebuilds windows/overlay + re-covers
+    });
+  });
+});
+
+/* start with one page */
+addPageTracked();
+</script>
+</body>
+</html>
